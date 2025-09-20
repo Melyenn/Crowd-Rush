@@ -1,0 +1,1726 @@
+<![DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Count Master Stickman</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        -webkit-user-select: none;
+        -ms-user-select: none;
+        user-select: none;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        width: 100%;
+        max-width: 500px;
+        aspect-ratio: 2 / 3; /* portrait 2:3 */
+        margin: 0 auto;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        font-family: "Arial", sans-serif;
+        box-sizing: border-box;
+        padding: 12px;
+      }
+      /* wrapper ensures measured width/height match the visible game area */
+      #gameWrap {
+        width: 100%;
+        height: 100%;
+        box-sizing: border-box;
+        position: relative;
+        display: flex;
+        align-items: stretch;
+        justify-content: stretch;
+      }
+      canvas {
+        background: linear-gradient(180deg, #87ceeb 0%, #98fb98 100%);
+        border-radius: 12px;
+        display: none;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        display: block;
+      }
+      /* Center the play/restart button in the viewport */
+      #playBtn {
+        padding: 15px 30px;
+        font-size: 24px;
+        font-weight: bold;
+        border: none;
+        background: linear-gradient(45deg, #ff6b6b, #ff8e53);
+        color: #fff;
+        border-radius: 15px;
+        cursor: pointer;
+        box-shadow: 0 4px 15px rgba(255, 107, 107, 0.4);
+        transition: transform 0.2s;
+        z-index: 20;
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+      }
+      #playBtn:hover {
+        transform: translate(-50%, -50%) translateY(-2px);
+      }
+      #info {
+        font-size: 18px;
+        margin-top: 15px;
+        color: #fff;
+        text-align: center;
+        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+      }
+
+      /* Mobile touch controls overlay (left/right halves) */
+      #touchControls {
+        position: absolute;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        height: 42%;
+        display: none;
+        z-index: 15;
+        pointer-events: none; /* enable children to receive events */
+      }
+      .touchHalf {
+        position: absolute;
+        bottom: 0;
+        width: 50%;
+        height: 100%;
+        pointer-events: auto;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #touchLeft {
+        left: 0;
+        background: linear-gradient(90deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0));
+      }
+      #touchRight {
+        right: 0;
+        background: linear-gradient(-90deg, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0));
+      }
+      /* subtle indicators (non-obtrusive) */
+      .touchIndicator {
+        position: absolute;
+        bottom: 14%;
+        width: 68px;
+        height: 68px;
+        background: rgba(255, 255, 255, 0.06);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        font-size: 32px;
+        left: 12%;
+        transform: translateX(-50%);
+        pointer-events: none;
+      }
+      #touchRight .touchIndicator {
+        left: 88%;
+        transform: translateX(-50%);
+      }
+      @media (min-width: 480px) {
+        #touchControls {
+          height: 36%;
+        }
+      }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@farcade/game-sdk@0.2.0/dist/index.min.js"></script>
+  </head>
+  <body>
+    <button id="playBtn">🚀 Start Game</button>
+    <div id="gameWrap">
+      <canvas id="game" width="500" height="750"></canvas>
+
+      <!-- Touch controls overlay -->
+      <div id="touchControls" aria-hidden="true">
+        <div id="touchLeft" class="touchHalf">
+          <div class="touchIndicator">◀</div>
+        </div>
+        <div id="touchRight" class="touchHalf">
+          <div class="touchIndicator">▶</div>
+        </div>
+      </div>
+    </div>
+    <div id="info"></div>
+
+    <script>
+      // Use the wrapper as the measurement container so width/height match visible area
+      const container = document.getElementById("gameWrap");
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      const playBtn = document.getElementById("playBtn");
+      const infoText = document.getElementById("info");
+      const touchControls = document.getElementById("touchControls");
+      const touchLeft = document.getElementById("touchLeft");
+      const touchRight = document.getElementById("touchRight");
+
+      let dpr = Math.max(1, window.devicePixelRatio || 1);
+      let w = 500;
+      let h = 750;
+
+      // Audio manager (WebAudio synth; respects isMuted and Farcade toggle_mute)
+      let audioCtx = null;
+      let masterGain = null;
+      let bgGain = null;
+      let sfxGain = null;
+      let audioInited = false;
+      let bgInterval = null;
+      let battleInterval = null;
+      let battlePlaying = false;
+      let hitCooldown = 0;
+      let noiseBuffer = null;
+
+      let isMuted = false;
+
+      function initAudio() {
+        if (audioInited) {
+          // try to resume if suspended
+          if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+          return;
+        }
+        try {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        } catch (e) {
+          audioCtx = null;
+          return;
+        }
+        masterGain = audioCtx.createGain();
+        bgGain = audioCtx.createGain();
+        sfxGain = audioCtx.createGain();
+
+        // default volumes (background softened)
+        masterGain.gain.value = isMuted ? 0 : 0.9;
+        bgGain.gain.value = 0.45; // lowered for a gentler background (unused)
+        sfxGain.gain.value = 1.0;
+
+        // node chain
+        bgGain.connect(masterGain);
+        sfxGain.connect(masterGain);
+        masterGain.connect(audioCtx.destination);
+
+        // prepare short noise buffer for percussive hits / hi-hats (kept low-volume)
+        const bufLen = Math.floor(audioCtx.sampleRate * 0.2);
+        noiseBuffer = audioCtx.createBuffer(1, bufLen, audioCtx.sampleRate);
+        const d = noiseBuffer.getChannelData(0);
+        for (let i = 0; i < bufLen; i++) d[i] = (Math.random() * 2 - 1) * 0.25; // reduced amplitude
+
+        audioInited = true;
+      }
+
+      function setMuted(mute) {
+        isMuted = !!mute;
+        if (!audioInited) return;
+        masterGain.gain.setTargetAtTime(isMuted ? 0 : 0.9, audioCtx.currentTime, 0.01);
+      }
+
+      // play a short oscillator sfx with envelope
+      function playSfx({ type = "blip" } = {}) {
+        if (isMuted || !audioInited) return;
+        const now = audioCtx.currentTime;
+        if (type === "gate") {
+          // upward pitch blip (soft)
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = "sine";
+          o.frequency.setValueAtTime(260, now);
+          o.frequency.exponentialRampToValueAtTime(520, now + 0.15);
+          g.gain.setValueAtTime(0, now);
+          g.gain.linearRampToValueAtTime(0.06, now + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+          o.connect(g);
+          g.connect(sfxGain);
+          o.start(now);
+          o.stop(now + 0.28);
+        } else if (type === "battle_start") {
+          // short warm hit
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = "triangle";
+          o.frequency.setValueAtTime(140, now);
+          g.gain.setValueAtTime(0, now);
+          g.gain.linearRampToValueAtTime(0.12, now + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+          o.connect(g);
+          g.connect(sfxGain);
+          o.start(now);
+          o.stop(now + 0.28);
+        } else if (type === "hit") {
+          // small mellow hit
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = "triangle";
+          o.frequency.setValueAtTime(260, now);
+          g.gain.setValueAtTime(0, now);
+          g.gain.linearRampToValueAtTime(0.05, now + 0.005);
+          g.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+          o.connect(g);
+          g.connect(sfxGain);
+          o.start(now);
+          o.stop(now + 0.14);
+        } else if (type === "enemy_defeated") {
+          // victory short flourish (soft)
+          const freqs = [480, 600, 720];
+          freqs.forEach((f, i) => {
+            const o = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            const t = now + i * 0.09;
+            o.type = "sine";
+            o.frequency.setValueAtTime(f, t);
+            g.gain.setValueAtTime(0, t);
+            g.gain.linearRampToValueAtTime(0.08, t + 0.01);
+            g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+            o.connect(g);
+            g.connect(sfxGain);
+            o.start(t);
+            o.stop(t + 0.45);
+          });
+        } else if (type === "level_victory") {
+          // fallback shorter arpeggio (not used; replaced by extended version)
+          const seq = [262, 330, 392, 523];
+          seq.forEach((f, i) => {
+            const o = audioCtx.createOscillator();
+            const g = audioCtx.createGain();
+            const t = now + i * 0.18;
+            o.type = "sine";
+            o.frequency.setValueAtTime(f, t);
+            g.gain.setValueAtTime(0, t);
+            g.gain.linearRampToValueAtTime(0.09, t + 0.01);
+            g.gain.exponentialRampToValueAtTime(0.001, t + 0.55);
+            o.connect(g);
+            g.connect(sfxGain);
+            o.start(t);
+            o.stop(t + 0.8);
+          });
+        }
+      }
+
+      // Background music disabled (user requested no background music)
+      function playBackgroundLoop() {
+        // intentionally disabled
+        return;
+      }
+      function stopBackgroundLoop() {
+        if (bgInterval) {
+          clearInterval(bgInterval);
+          bgInterval = null;
+        }
+      }
+
+      // Battle music loop (more powerful boomy pulses)
+      function playBattleLoop() {
+        if (!audioInited || isMuted) return;
+        if (battleInterval) return;
+        battlePlaying = true;
+        // lower background node (even if no background is playing)
+        if (bgGain) bgGain.gain.setTargetAtTime(0.08, audioCtx.currentTime, 0.03);
+        battleInterval = setInterval(() => {
+          const now = audioCtx.currentTime;
+
+          // sub-bass 'kick' (sine) - short punch
+          const sub = audioCtx.createOscillator();
+          const sg = audioCtx.createGain();
+          sub.type = "sine";
+          sub.frequency.setValueAtTime(50 + Math.random() * 30, now);
+          sg.gain.setValueAtTime(0.0001, now);
+          sg.gain.linearRampToValueAtTime(0.9, now + 0.01);
+          sg.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
+          sub.connect(sg);
+          sg.connect(sfxGain);
+          sub.start(now);
+          sub.stop(now + 0.5);
+
+          // sawtooth stab (mid/high) - keep for battle feel but slightly tamed
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = "sawtooth";
+          o.frequency.setValueAtTime(200 + Math.random() * 260, now);
+          g.gain.setValueAtTime(0.0001, now);
+          g.gain.linearRampToValueAtTime(0.22, now + 0.008); // slightly lower than before
+          g.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+          // bandpass to reduce piercing highs
+          const bp = audioCtx.createBiquadFilter();
+          bp.type = "bandpass";
+          bp.frequency.setValueAtTime(800, now);
+          bp.Q.setValueAtTime(0.8, now);
+          o.connect(g);
+          g.connect(bp);
+          bp.connect(sfxGain);
+          o.start(now);
+          o.stop(now + 0.28);
+
+          // percussive noise click to add 'boom' texture (soft)
+          if (noiseBuffer) {
+            const src = audioCtx.createBufferSource();
+            src.buffer = noiseBuffer;
+            const ng = audioCtx.createGain();
+            ng.gain.setValueAtTime(0.0001, now);
+            ng.gain.linearRampToValueAtTime(0.14, now + 0.005); // moderated
+            ng.gain.exponentialRampToValueAtTime(0.0008, now + 0.12);
+            // lowpass to reduce harshness
+            const lp = audioCtx.createBiquadFilter();
+            lp.type = "lowpass";
+            lp.frequency.setValueAtTime(6000, now);
+            src.connect(lp);
+            lp.connect(ng);
+            ng.connect(sfxGain);
+            src.start(now);
+            src.stop(now + 0.12);
+          }
+        }, 220);
+      }
+
+      function stopBattleLoop() {
+        if (battleInterval) {
+          clearInterval(battleInterval);
+          battleInterval = null;
+        }
+        battlePlaying = false;
+        if (bgGain) bgGain.gain.setTargetAtTime(0.45, audioCtx.currentTime, 0.05);
+      }
+
+      // Extended, joyful victory music (longer & happier)
+      function playLevelVictorySound() {
+        initAudio();
+        if (!audioInited || isMuted) return;
+        const now = audioCtx.currentTime;
+
+        // Joyful ascending arpeggio (major) — longer duration
+        const base = 523.25; // C5
+        const majorOffsets = [0, 4, 7, 12]; // root, major 3rd, 5th, octave
+        const arpPattern = [0, 1, 2, 3, 2, 1, 0, 3]; // sequence indices into majorOffsets
+        arpPattern.forEach((idx, i) => {
+          const t = now + i * 0.35;
+          const freq = base * Math.pow(2, majorOffsets[idx] / 12);
+          const osc = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          osc.type = "triangle";
+          osc.frequency.setValueAtTime(freq, t);
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(0.08, t + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0004, t + 1.0);
+          const lp = audioCtx.createBiquadFilter();
+          lp.type = "lowpass";
+          lp.frequency.setValueAtTime(4000, t);
+          osc.connect(g);
+          g.connect(lp);
+          lp.connect(sfxGain);
+          osc.start(t);
+          osc.stop(t + 1.1);
+        });
+
+        // Layered bell/chime accents
+        const bellNotes = [1046.5, 1318.51, 1567.98]; // C6, E6, G6
+        bellNotes.forEach((f, i) => {
+          const t = now + 0.6 + i * 0.28;
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = "sine";
+          o.frequency.setValueAtTime(f, t);
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(0.07, t + 0.01);
+          g.gain.exponentialRampToValueAtTime(0.00005, t + 2.0);
+          const hp = audioCtx.createBiquadFilter();
+          hp.type = "highpass";
+          hp.frequency.setValueAtTime(400, t);
+          o.connect(g);
+          g.connect(hp);
+          hp.connect(sfxGain);
+          o.start(t);
+          o.stop(t + 2.2);
+        });
+
+        // Warm pad flourish beneath (sustained, low amplitude)
+        const padFreqs = [130.81, 164.81, 196.0]; // C3, E3, G3
+        padFreqs.forEach((freq, j) => {
+          const t = now + 0.05;
+          const o = audioCtx.createOscillator();
+          const g = audioCtx.createGain();
+          o.type = j === 1 ? "triangle" : "sine";
+          o.frequency.setValueAtTime(freq, t);
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(0.03, t + 0.2);
+          g.gain.exponentialRampToValueAtTime(0.00005, t + 3.2);
+          const lp = audioCtx.createBiquadFilter();
+          lp.type = "lowpass";
+          lp.frequency.setValueAtTime(1200, t);
+          o.connect(g);
+          g.connect(lp);
+          lp.connect(sfxGain);
+          o.start(t);
+          o.stop(t + 3.4);
+        });
+
+        // Subtle sparkling noise for a short time
+        if (noiseBuffer) {
+          const src = audioCtx.createBufferSource();
+          src.buffer = noiseBuffer;
+          const ng = audioCtx.createGain();
+          const t = now + 0.4;
+          ng.gain.setValueAtTime(0, t);
+          ng.gain.linearRampToValueAtTime(0.05, t + 0.02);
+          ng.gain.exponentialRampToValueAtTime(0.0003, t + 1.2);
+          const hp = audioCtx.createBiquadFilter();
+          hp.type = "highpass";
+          hp.frequency.setValueAtTime(800, t);
+          src.connect(hp);
+          hp.connect(ng);
+          ng.connect(sfxGain);
+          src.start(t);
+          src.stop(t + 1.1);
+        }
+      }
+
+      // Convenience wrappers
+      function playGateSound() {
+        playSfx({ type: "gate" });
+      }
+      function playBattleStartSound() {
+        playSfx({ type: "battle_start" });
+      }
+      function playHitSound() {
+        playSfx({ type: "hit" });
+      }
+      function playEnemyDefeatedSound() {
+        playSfx({ type: "enemy_defeated" });
+      }
+      // playLevelVictorySound is defined above (extended joyful)
+      // --- End audio manager ---
+
+      // Game state variables (keep original logic & algorithm)
+      let autoSpeed = 3;
+      let playerX, playerY, crowdSize, gates, running, crowdMax;
+      let level = 1;
+      let gameCompleted = false;
+      let gatesPassedCount = 0;
+      let enemies = [];
+      let battleShake = 0;
+      let battleParticles = [];
+      let battleMode = false;
+      let battleTimer = 0;
+      let currentEnemy = null;
+      let totalGatesPerLevel = 5;
+
+      // New: hazards and treasures for level >= 2
+      let hazards = [];
+      let treasures = [];
+      let flying = false;
+      let flightTimer = 0; // frames
+      const flightDurationFrames = 300; // ~5s at 60fps
+      const flightLift = 80; // how much higher the crowd is when flying
+
+      const pathWidthRatio = 250; // used as base, will be scaled relative to w later
+
+      let pathWidth = 250;
+      let pathX = 0;
+      let pathCenter = 0;
+      let laneLeftLimit = 0;
+      let laneRightLimit = 0;
+
+      let leftLaneX = 0;
+      let rightLaneX = 0;
+      let playerLane = 1; // 1 = left, 2 = right
+
+      let farcadeReported = false;
+
+      // Touch / swipe helpers
+      let touchStartX = 0;
+      let touchStartY = 0;
+      let touchStartT = 0;
+      let holdingLeft = false;
+      let holdingRight = false;
+
+      function resizeCanvas() {
+        // CSS size comes from container computed size
+        const cssW = container.clientWidth;
+        const cssH = container.clientHeight;
+        dpr = Math.max(1, window.devicePixelRatio || 1);
+
+        canvas.style.width = cssW + "px";
+        canvas.style.height = cssH + "px";
+        canvas.width = Math.round(cssW * dpr);
+        canvas.height = Math.round(cssH * dpr);
+
+        // Use transform scaling so drawing uses CSS pixels as units
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        w = cssW;
+        h = cssH;
+
+        // recompute path and lanes
+        pathWidth = Math.min(320, Math.max(180, (pathWidthRatio / 500) * w)); // relative scale but keep similar look
+        pathX = (w - pathWidth) / 2;
+        pathCenter = w / 2;
+        laneLeftLimit = pathX + 15;
+        laneRightLimit = pathX + pathWidth - 15;
+        leftLaneX = pathCenter - pathWidth / 4;
+        rightLaneX = pathCenter + pathWidth / 4;
+
+        // if player exists, clamp
+        if (playerX !== undefined) {
+          playerX = Math.max(laneLeftLimit, Math.min(laneRightLimit, playerX));
+        }
+        if (playerY === undefined) playerY = h - 120;
+
+        // clamp hazards/treasures when resizing
+        for (let t of treasures) {
+          t.x = Math.max(pathX + 30, Math.min(pathX + pathWidth - 30, t.x));
+        }
+        for (let z of hazards) {
+          z.x = Math.max(pathX + 40, Math.min(pathX + pathWidth - 40, z.x));
+        }
+
+        // update control overlay visibility/position if needed
+        updateControlsVisibility();
+      }
+
+      window.addEventListener("resize", resizeCanvas);
+      resizeCanvas();
+
+      function updateControlsVisibility() {
+        // show overlay only when canvas is visible and on touch devices
+        const isTouch = "ontouchstart" in window || navigator.maxTouchPoints > 0;
+        touchControls.style.display = canvas.style.display === "block" && isTouch ? "block" : "none";
+      }
+
+      // --- Original game functions (preserve logic) ---
+      function resetGame(initLevelReset) {
+        if (initLevelReset) {
+          level = 1;
+        }
+
+        playerX = pathCenter;
+        playerY = h - 120;
+
+        crowdSize = 1;
+        crowdMax = 1;
+        autoSpeed = 3 + (level - 1) * 0.5;
+        totalGatesPerLevel = Math.round(10 + (level - 1) * 0.5);
+
+        gates = [];
+        enemies = [];
+        hazards = [];
+        treasures = [];
+        battleParticles = [];
+        battleShake = 0;
+        battleMode = false;
+        battleTimer = 0;
+        currentEnemy = null;
+        running = true;
+        gameCompleted = false;
+        gatesPassedCount = 0;
+        farcadeReported = false;
+        flying = false;
+        flightTimer = 0;
+
+        generateGates();
+        loop();
+      }
+
+      function caculate(type, value, base) {
+        if (isNaN(base)) base = 1;
+        if (type === "add") return base + value;
+        if (type === "multiply") return base * value;
+        if (type === "subtract") return base - value;
+      }
+
+      function generateGates() {
+        gates = [];
+        enemies = [];
+        hazards = [];
+        treasures = [];
+
+        const baseGateSpacing = 350;
+        const gateSpacing = Math.max(150, baseGateSpacing - (level - 1) * 25);
+        const gateWidth = pathWidth / 2;
+        const leftGateX = pathCenter - gateWidth / 2;
+        const rightGateX = pathCenter + gateWidth / 2;
+
+        for (let i = 0; i < totalGatesPerLevel; i++) {
+          const y = 50 - i * gateSpacing;
+
+          const operations = generateGateOperations(level);
+          gates.push({
+            x: leftGateX,
+            y: y,
+            type: operations[0].type,
+            value: operations[0].value,
+            width: gateWidth,
+            height: 60,
+            passed: false,
+          });
+
+          gates.push({
+            x: rightGateX,
+            y: y,
+            type: operations[1].type,
+            value: operations[1].value,
+            width: gateWidth,
+            height: 60,
+            passed: false,
+          });
+
+          let base = crowdMax || 1;
+
+          let crowdLeft = caculate(operations[0].type, operations[0].value, base);
+          let crowdRight = caculate(operations[1].type, operations[1].value, base);
+
+          crowdMax = Math.max(crowdLeft, crowdRight);
+          if (crowdMax <= 0) {
+            gates.pop();
+            gates.push({
+              x: rightGateX,
+              y: y,
+              type: "add",
+              value: operations[1].value,
+              width: gateWidth,
+              height: 60,
+              passed: false,
+            });
+            crowdMax = caculate("add", operations[1].value, base);
+          }
+
+          if (i > 1 && i % 3 === 0) {
+            const enemyY = y - gateSpacing / 2;
+            const enemyCount = Math.floor(crowdMax * 0.8);
+            crowdMax -= enemyCount;
+
+            enemies.push({
+              x: pathCenter + (Math.random() > 0.5 ? -pathWidth / 4 : pathWidth / 4),
+              y: enemyY,
+              count: enemyCount,
+              hp: enemyCount,
+              maxCount: enemyCount,
+              width: 120,
+              height: 60,
+              defeated: false,
+              battling: false,
+            });
+          }
+
+          // For level >= 2 add occasional hazards and treasures between gates
+          if (level >= 2) {
+            // hazard (gập ghềnh): centered somewhere across path, width varies
+            if (Math.random() < 0.6) {
+              const hzX = pathCenter + (Math.random() - 0.5) * (pathWidth * 0.6);
+              hazards.push({
+                x: Math.max(pathX + 40, Math.min(pathX + pathWidth - 40, hzX)),
+                y: y - gateSpacing / 3,
+                width: Math.max(60, Math.min(180, Math.random() * 140)),
+                height: 18,
+                impact: Math.ceil(1 + Math.random() * 3), // how many soldiers fall
+                triggered: false,
+              });
+            }
+            // treasure: chance to spawn a flight gem
+            if (Math.random() < 0.25) {
+              const tx = pathCenter + (Math.random() - 0.5) * (pathWidth * 0.6);
+              treasures.push({
+                x: Math.max(pathX + 30, Math.min(pathX + pathWidth - 30, tx)),
+                y: y - gateSpacing / 2 - 20 + (Math.random() * 40 - 20),
+                radius: 12,
+                collected: false,
+              });
+            }
+          }
+        }
+
+        gates.push({
+          x: pathCenter,
+          y: 50 - totalGatesPerLevel * Math.max(150, baseGateSpacing - (level - 1) * 25) - 100,
+          type: "finish",
+          value: 0,
+          width: pathWidth,
+          height: 40,
+          passed: false,
+        });
+      }
+
+      function generateGateOperations(currentLevel) {
+        const operations = [];
+        const addChance = 0.45;
+        const multiplyChance = currentLevel > 1 ? 0.25 : 0.1;
+        const subtractChance = 1 - addChance - multiplyChance;
+
+        for (let i = 0; i < 2; i++) {
+          const rand = Math.random();
+          let op = {};
+
+          if (rand < addChance) {
+            op.type = "add";
+            op.value = Math.floor(Math.random() * 15) + 3;
+          } else if (rand < addChance + multiplyChance) {
+            op.type = "multiply";
+            op.value = Math.floor(Math.random() * 2) + 2;
+          } else {
+            op.type = "subtract";
+            op.value = Math.floor(Math.random() * 8) + 1;
+          }
+
+          operations.push(op);
+        }
+
+        if (operations[0].type === operations[1].type && operations[0].value === operations[1].value) {
+          operations[1].type = operations[0].type === "add" ? "multiply" : "add";
+          operations[1].value = operations[1].type === "add" ? Math.floor(Math.random() * 12) + 2 : 2;
+        }
+
+        return operations;
+      }
+
+      function drawPath() {
+        const px = pathX;
+        ctx.fillStyle = "#90EE90";
+        ctx.fillRect(px, 0, pathWidth, h);
+
+        ctx.strokeStyle = "#228B22";
+        ctx.lineWidth = 4;
+        ctx.strokeRect(px, 0, pathWidth, h);
+
+        ctx.setLineDash([20, 20]);
+        ctx.strokeStyle = "#FFFFFF";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(pathCenter, 0);
+        ctx.lineTo(pathCenter, h);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      function createFinishParticles(x, y) {
+        for (let i = 0; i < 50; i++) {
+          battleParticles.push({
+            x: x + (Math.random() - 0.5) * 200,
+            y: y + (Math.random() - 0.5) * 100,
+            vx: (Math.random() - 0.5) * 8,
+            vy: (Math.random() - 1) * 8,
+            size: Math.random() * 6 + 2,
+            color: `hsl(${Math.random() * 360}, 100%, 60%)`,
+            life: 60,
+          });
+        }
+      }
+
+      function drawGates() {
+        for (let g of gates) {
+          if (g.passed) continue;
+          if (g.y > h + 100 || g.y < -300) continue;
+
+          if (g.type === "finish") {
+            ctx.fillStyle = "#FFD700";
+            ctx.fillRect(g.x - g.width / 2, g.y, g.width, g.height);
+            ctx.fillStyle = "#000";
+            ctx.font = "bold 24px Arial";
+            ctx.textAlign = "center";
+            ctx.fillText("FINISH", g.x, g.y + 28);
+            continue;
+          }
+
+          const gx = g.x - g.width / 2;
+          const gy = g.y;
+
+          let color, symbol;
+          switch (g.type) {
+            case "add":
+              color = "#4CAF50";
+              symbol = "+";
+              break;
+            case "multiply":
+              color = "#2196F3";
+              symbol = "×";
+              break;
+            case "subtract":
+              color = "#F44336";
+              symbol = "-";
+              break;
+          }
+
+          const gradient = ctx.createLinearGradient(gx, gy, gx, gy + g.height);
+          gradient.addColorStop(0, color);
+          gradient.addColorStop(1, adjustBrightness(color, -30));
+
+          ctx.fillStyle = gradient;
+          ctx.fillRect(gx, gy, g.width, g.height);
+
+          ctx.strokeStyle = adjustBrightness(color, -50);
+          ctx.lineWidth = 3;
+          ctx.strokeRect(gx, gy, g.width, g.height);
+
+          ctx.fillStyle = "#FFFFFF";
+          ctx.font = "bold 22px Arial";
+          ctx.textAlign = "center";
+          ctx.shadowColor = "rgba(0,0,0,0.8)";
+          ctx.shadowBlur = 3;
+          ctx.fillText(`${symbol}${g.value}`, g.x, gy + g.height / 2 + 8);
+          ctx.shadowBlur = 0;
+        }
+      }
+
+      function adjustBrightness(color, amount) {
+        const num = parseInt(color.replace("#", ""), 16);
+        const amt = Math.round(2.55 * amount);
+        const R = (num >> 16) + amt;
+        const G = ((num >> 8) & 0x00ff) + amt;
+        const B = (num & 0x0000ff) + amt;
+        return (
+          "#" +
+          (
+            0x1000000 +
+            (R < 255 ? (R < 1 ? 0 : R) : 255) * 0x10000 +
+            (G < 255 ? (G < 1 ? 0 : G) : 255) * 0x100 +
+            (B < 255 ? (B < 1 ? 0 : B) : 255)
+          )
+            .toString(16)
+            .slice(1)
+        );
+      }
+
+      function drawStickman(x, y, color = "#2196F3", size = 1) {
+        const s = size * 8;
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.fillStyle = color;
+
+        // Head
+        ctx.beginPath();
+        ctx.arc(x, y - s * 2, s * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Body
+        ctx.beginPath();
+        ctx.moveTo(x, y - s * 1.2);
+        ctx.lineTo(x, y + s * 1.5);
+        ctx.stroke();
+
+        // Arms
+        ctx.beginPath();
+        ctx.moveTo(x - s * 0.8, y - s * 0.5);
+        ctx.lineTo(x + s * 0.8, y - s * 0.5);
+        ctx.stroke();
+
+        // Legs
+        ctx.beginPath();
+        ctx.moveTo(x, y + s * 1.5);
+        ctx.lineTo(x - s * 0.6, y + s * 2.5);
+        ctx.moveTo(x, y + s * 1.5);
+        ctx.lineTo(x + s * 0.6, y + s * 2.5);
+        ctx.stroke();
+      }
+
+      function drawCrowd() {
+        if (crowdSize <= 0) return;
+
+        const renderY = playerY - (flying ? flightLift : 0);
+
+        const maxCols = Math.min(10, Math.ceil(Math.sqrt(crowdSize * 1.2)));
+        const spacing = Math.min(15, 80 / maxCols);
+
+        for (let i = 0; i < crowdSize; i++) {
+          const col = i % maxCols;
+          const row = Math.floor(i / maxCols);
+          const x = playerX + (col - maxCols / 2 + 0.5) * spacing;
+          const y = renderY - row * spacing * 0.6 + 10;
+
+          const offsetX = Math.sin(Date.now() * 0.01 + i) * 2;
+          const offsetY = Math.cos(Date.now() * 0.01 + i) * 1;
+
+          drawStickman(x + offsetX, y + offsetY, "#2196F3", 0.8);
+        }
+
+        // If flying, draw a subtle ring to indicate flight power
+        if (flying) {
+          ctx.beginPath();
+          ctx.strokeStyle = "rgba(255,255,255,0.6)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 6]);
+          ctx.arc(playerX, renderY + 40, 36, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
+
+      function drawEnemies() {
+        for (let enemy of enemies) {
+          if (enemy.y > h + 100 || enemy.y < -200 || enemy.defeated) continue;
+
+          const maxCols = Math.min(8, Math.ceil(Math.sqrt(enemy.count)));
+          const spacing = Math.min(12, enemy.width / maxCols);
+
+          for (let i = 0; i < Math.min(enemy.count, 30); i++) {
+            const col = i % maxCols;
+            const row = Math.floor(i / maxCols);
+            const x = enemy.x + (col - maxCols / 2) * spacing;
+            const y = enemy.y + row * spacing * 0.7 + 25;
+
+            drawStickman(x, y, "#FF0000", 0.7);
+          }
+
+          const maxHP = enemy.maxCount || enemy.count;
+          const currentHP = enemy.hp !== undefined ? enemy.hp : enemy.count;
+          const barWidth = 60;
+          const barHeight = 6;
+          const percent = Math.max(0, Math.min(1, currentHP / maxHP));
+
+          ctx.strokeStyle = "#000";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(enemy.x - barWidth / 2, enemy.y - 25, barWidth, barHeight);
+
+          ctx.fillStyle = "#FF0000";
+          ctx.fillRect(enemy.x - barWidth / 2, enemy.y - 25, barWidth * percent, barHeight);
+
+          ctx.fillStyle = "#fff";
+          ctx.font = "bold 12px Arial";
+          ctx.textAlign = "center";
+          ctx.fillText(currentHP.toString(), enemy.x, enemy.y - 28);
+        }
+      }
+
+      // Draw bumpy hazards (gập ghềnh)
+      function drawHazards() {
+        for (let hz of hazards) {
+          if (hz.triggered) continue;
+          if (hz.y > h + 100 || hz.y < -200) continue;
+          // jagged shape
+          const left = hz.x - hz.width / 2;
+          const right = hz.x + hz.width / 2;
+          const top = hz.y;
+          ctx.save();
+          ctx.translate(0, 0);
+          ctx.fillStyle = "#8B4513";
+          ctx.beginPath();
+          const spikes = 6;
+          const step = hz.width / spikes;
+          ctx.moveTo(left, top);
+          for (let i = 0; i <= spikes; i++) {
+            const sx = left + i * step;
+            const sy = top + (i % 2 === 0 ? hz.height : hz.height / 3);
+            ctx.lineTo(sx, sy);
+          }
+          ctx.lineTo(right, top);
+          ctx.lineTo(right, top + hz.height + 6);
+          ctx.lineTo(left, top + hz.height + 6);
+          ctx.closePath();
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      // Draw treasures (flight gems)
+      function drawTreasures() {
+        for (let t of treasures) {
+          if (t.collected) continue;
+          if (t.y > h + 100 || t.y < -200) continue;
+          // glowing gem
+          ctx.beginPath();
+          const grad = ctx.createRadialGradient(t.x, t.y, 2, t.x, t.y, t.radius * 2);
+          grad.addColorStop(0, "rgba(255, 240, 120, 1)");
+          grad.addColorStop(0.4, "rgba(255, 200, 50, 0.9)");
+          grad.addColorStop(1, "rgba(255, 150, 10, 0.2)");
+          ctx.fillStyle = grad;
+          ctx.arc(t.x, t.y, t.radius, 0, Math.PI * 2);
+          ctx.fill();
+
+          // small sparkle
+          ctx.fillStyle = "#fff";
+          ctx.beginPath();
+          ctx.arc(t.x - t.radius / 3, t.y - t.radius / 2, t.radius / 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      function createBattleParticles(x, y) {
+        for (let i = 0; i < 15; i++) {
+          battleParticles.push({
+            x: x + (Math.random() - 0.5) * 80,
+            y: y + (Math.random() - 0.5) * 60,
+            vx: (Math.random() - 0.5) * 8,
+            vy: (Math.random() - 0.5) * 8,
+            size: Math.random() * 6 + 2,
+            color: `hsl(${Math.random() * 60 + 15}, 100%, 60%)`,
+            life: 30,
+          });
+        }
+      }
+
+      function createVictoryParticles(x, y) {
+        for (let i = 0; i < 20; i++) {
+          battleParticles.push({
+            x: x + (Math.random() - 0.5) * 100,
+            y: y + (Math.random() - 0.5) * 80,
+            vx: (Math.random() - 0.5) * 6,
+            vy: Math.random() * -8 - 2,
+            size: Math.random() * 8 + 3,
+            color: `hsl(${Math.random() * 120 + 60}, 100%, 60%)`,
+            life: 40,
+          });
+        }
+      }
+
+      function updateBattleEffects() {
+        if (battleShake > 0) {
+          battleShake -= 1;
+        }
+
+        for (let i = battleParticles.length - 1; i >= 0; i--) {
+          const p = battleParticles[i];
+          p.x += p.vx;
+          p.y += p.vy;
+          p.vy += 0.3;
+          p.life--;
+          p.size *= 0.96;
+
+          if (p.life <= 0 || p.size < 0.5) {
+            battleParticles.splice(i, 1);
+          }
+        }
+      }
+
+      function drawBattleEffects() {
+        for (let p of battleParticles) {
+          ctx.globalAlpha = Math.max(0, Math.min(1, p.life / 40));
+          ctx.fillStyle = p.color;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      function handleInput() {
+        // Holding overlay buttons should set lane; drag/touch also allowed
+        if (holdingLeft) playerLane = 1;
+        if (holdingRight) playerLane = 2;
+
+        if (playerLane === 1) {
+          // smooth move toward left lane for nicer feel on touch
+          playerX += (leftLaneX - playerX) * 0.35;
+        } else if (playerLane === 2) {
+          playerX += (rightLaneX - playerX) * 0.35;
+        }
+        // clamp
+        playerX = Math.max(laneLeftLimit, Math.min(laneRightLimit, playerX));
+      }
+
+      document.addEventListener("keydown", (e) => {
+        if (!running) return;
+        if (e.code === "ArrowLeft" || e.key.toLowerCase() === "a") {
+          playerLane = 1;
+          playerX = leftLaneX;
+        }
+        if (e.code === "ArrowRight" || e.key.toLowerCase() === "d") {
+          playerLane = 2;
+          playerX = rightLaneX;
+        }
+      });
+
+      canvas.addEventListener("mousemove", (e) => {
+        if (!running) return;
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const targetX = (mouseX / rect.width) * w;
+
+        if (Math.abs(targetX - playerX) > 10) {
+          playerX += (targetX - playerX) * 0.1;
+          playerX = Math.max(laneLeftLimit, Math.min(laneRightLimit, playerX));
+        }
+      });
+
+      // New: click & mousedown to switch lanes (left/right halves)
+      canvas.addEventListener("click", (e) => {
+        if (!running) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        if (mx < rect.width / 2) {
+          playerLane = 1;
+          playerX = leftLaneX;
+        } else {
+          playerLane = 2;
+          playerX = rightLaneX;
+        }
+        try {
+          window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+        } catch (err) {}
+      });
+      // support mousedown for quicker immediate response on desktop
+      canvas.addEventListener("mousedown", (e) => {
+        if (!running) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        if (mx < rect.width / 2) {
+          playerLane = 1;
+          playerX = leftLaneX;
+        } else {
+          playerLane = 2;
+          playerX = rightLaneX;
+        }
+        try {
+          window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+        } catch (err) {}
+      });
+
+      // Touch handling (canvas) - support taps and swipe gestures
+      canvas.addEventListener(
+        "touchstart",
+        (e) => {
+          if (!running) return;
+          const rect = canvas.getBoundingClientRect();
+          const t = e.touches[0];
+          touchStartX = t.clientX - rect.left;
+          touchStartY = t.clientY - rect.top;
+          touchStartT = Date.now();
+
+          // allow tap immediate lane selection (but keep swipe detection)
+          const targetX = (touchStartX / rect.width) * w;
+          if (targetX < pathCenter) {
+            playerLane = 1;
+          } else {
+            playerLane = 2;
+          }
+        },
+        { passive: true },
+      );
+
+      canvas.addEventListener(
+        "touchend",
+        (e) => {
+          if (!running) return;
+          const rect = canvas.getBoundingClientRect();
+          // if changed touches are available use last changed
+          const touch = e.changedTouches && e.changedTouches[0];
+          if (!touch) return;
+          const endX = touch.clientX - rect.left;
+          const endY = touch.clientY - rect.top;
+          const dt = Date.now() - touchStartT;
+          const dx = endX - touchStartX;
+          const dy = endY - touchStartY;
+
+          // swipe detection (prioritize horizontal swipes)
+          if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+            if (dx < 0) {
+              playerLane = 1;
+            } else {
+              playerLane = 2;
+            }
+          } else {
+            // treat as tap if quick and small movement
+            if (dt < 400 && Math.abs(dx) < 30 && Math.abs(dy) < 30) {
+              if (endX < rect.width / 2) {
+                playerLane = 1;
+              } else {
+                playerLane = 2;
+              }
+            }
+          }
+        },
+        { passive: true },
+      );
+
+      // Touch drag to move (mobile) - existing behavior preserved
+      canvas.addEventListener(
+        "touchmove",
+        (e) => {
+          if (!running) return;
+          e.preventDefault();
+          const rect = canvas.getBoundingClientRect();
+          const t = e.touches[0];
+          const mouseX = t.clientX - rect.left;
+          const targetX = (mouseX / rect.width) * w;
+          if (Math.abs(targetX - playerX) > 10) {
+            playerX += (targetX - playerX) * 0.1;
+            playerX = Math.max(laneLeftLimit, Math.min(laneRightLimit, playerX));
+          }
+        },
+        { passive: false },
+      );
+
+      // Touch controls overlay handlers (left/right halves)
+      function bindOverlayControls() {
+        // Prevent accidental gestures on these areas by capturing touches
+        touchLeft.addEventListener(
+          "touchstart",
+          (e) => {
+            if (!running) return;
+            e.preventDefault();
+            holdingLeft = true;
+            playerLane = 1;
+            updateControlsVisibility();
+            try {
+              window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+            } catch (err) {}
+          },
+          { passive: false },
+        );
+        touchLeft.addEventListener(
+          "touchend",
+          (e) => {
+            holdingLeft = false;
+          },
+          { passive: true },
+        );
+        touchLeft.addEventListener(
+          "touchcancel",
+          (e) => {
+            holdingLeft = false;
+          },
+          { passive: true },
+        );
+
+        touchRight.addEventListener(
+          "touchstart",
+          (e) => {
+            if (!running) return;
+            e.preventDefault();
+            holdingRight = true;
+            playerLane = 2;
+            updateControlsVisibility();
+            try {
+              window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+            } catch (err) {}
+          },
+          { passive: false },
+        );
+        touchRight.addEventListener(
+          "touchend",
+          (e) => {
+            holdingRight = false;
+          },
+          { passive: true },
+        );
+        touchRight.addEventListener(
+          "touchcancel",
+          (e) => {
+            holdingRight = false;
+          },
+          { passive: true },
+        );
+      }
+      bindOverlayControls();
+
+      function checkCollisions() {
+        for (let g of gates) {
+          if (!g.passed) {
+            if (g.type === "finish" && Math.abs(g.y - playerY) < 50) {
+              gameCompleted = true;
+              running = false;
+
+              // play level victory music (extended joyful)
+              initAudio();
+              playLevelVictorySound();
+              // create victory particles
+              for (let i = 0; i < 10; i++) {
+                createVictoryParticles(w / 2, h / 2 - 100 + i * 20);
+              }
+
+              const particleDuration = 1500;
+              const startTime = Date.now();
+
+              function fireworkLoop() {
+                const elapsed = Date.now() - startTime;
+                if (elapsed < particleDuration && battleParticles.length > 0) {
+                  ctx.clearRect(0, 0, w, h);
+                  drawPath();
+                  drawGates();
+                  drawEnemies();
+                  drawCrowd();
+                  drawBattleEffects();
+                  updateBattleEffects();
+                  requestAnimationFrame(fireworkLoop);
+                } else {
+                  showLevelComplete();
+                }
+              }
+
+              // haptic for finish
+              try {
+                window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+              } catch (e) {}
+              fireworkLoop();
+              return;
+            }
+
+            if (Math.abs(g.y - playerY) < 40 && Math.abs(playerX - g.x) < 60) {
+              switch (g.type) {
+                case "add":
+                  crowdSize += g.value;
+                  break;
+                case "subtract":
+                  crowdSize -= g.value;
+                  break;
+                case "multiply":
+                  crowdSize *= g.value;
+                  break;
+              }
+
+              crowdSize = Math.min(crowdSize, 300);
+              crowdMax = Math.max(crowdMax, crowdSize);
+
+              gates.filter((gate) => gate.y === g.y).forEach((gate) => (gate.passed = true));
+              gatesPassedCount++;
+              g.passed = true;
+
+              // haptic feedback on gate pass
+              try {
+                window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+              } catch (e) {}
+
+              // play gate sound
+              initAudio();
+              playGateSound();
+
+              // If a gate reduces the army to zero or below, trigger game over immediately
+              if (crowdSize <= 0) {
+                crowdSize = 0;
+                running = false;
+                reportGameOver();
+              }
+
+              break;
+            }
+          }
+        }
+
+        // Check treasure and hazard collisions (treasures collected by touching, hazards cause fall)
+        checkHazardTreasureCollisions();
+
+        checkEnemyCollisions();
+      }
+
+      function checkHazardTreasureCollisions() {
+        // Treasures
+        for (let t of treasures) {
+          if (t.collected) continue;
+          if (t.y > h + 100 || t.y < -200) continue;
+          const renderPlayerY = playerY - (flying ? flightLift : 0);
+          if (Math.abs(t.y - renderPlayerY) < 36 && Math.abs(playerX - t.x) < 36) {
+            t.collected = true;
+            flying = true;
+            flightTimer = flightDurationFrames;
+            // haptic
+            try {
+              window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+            } catch (e) {}
+            // small particles
+            createVictoryParticles(t.x, t.y);
+            // sfx
+            initAudio();
+            playSfx({ type: "gate" });
+          }
+        }
+
+        // Hazards
+        for (let hz of hazards) {
+          if (hz.triggered) continue;
+          if (hz.y > h + 100 || hz.y < -200) continue;
+          const renderPlayerY = playerY - (flying ? flightLift : 0);
+          // hazard collision only if player not flying above it (we compare to renderY)
+          if (Math.abs(hz.y - renderPlayerY) < 20 && Math.abs(playerX - hz.x) < hz.width / 2 + 10) {
+            // trigger fall
+            hz.triggered = true;
+            const lost = Math.min(crowdSize, hz.impact || 2);
+            crowdSize -= lost;
+            if (crowdSize < 0) crowdSize = 0;
+            battleShake = 8;
+            createBattleParticles(playerX, playerY);
+            // haptic on hit
+            try {
+              window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+            } catch (e) {}
+            // play hit sfx
+            initAudio();
+            playHitSound();
+            // If all soldiers lost, game over
+            if (crowdSize <= 0) {
+              crowdSize = 0;
+              running = false;
+              reportGameOver();
+            }
+          }
+        }
+      }
+
+      function checkEnemyCollisions() {
+        for (let enemy of enemies) {
+          if (enemy.defeated) continue;
+
+          if (!battleMode && Math.abs(enemy.y - playerY) < 50 && Math.abs(playerX - enemy.x) < 70) {
+            battleMode = true;
+            currentEnemy = enemy;
+            // start battle music & sfx
+            initAudio();
+            playBattleStartSound();
+            playBattleLoop();
+          }
+        }
+
+        if (battleMode && currentEnemy) {
+          const e = currentEnemy;
+
+          battleShake = 15;
+          createBattleParticles(e.x, e.y);
+
+          if (e.hp > 0 && crowdSize > 0) {
+            e.hp -= 1;
+            crowdSize -= 1;
+
+            // play occasional hit sound (throttle)
+            if (hitCooldown <= 0) {
+              initAudio();
+              playHitSound();
+              hitCooldown = 6; // frames throttle
+            }
+          }
+
+          if (hitCooldown > 0) hitCooldown--;
+
+          if (e.hp <= 0) {
+            e.defeated = true;
+            createVictoryParticles(e.x, e.y);
+            battleMode = false;
+            currentEnemy = null;
+
+            // stop battle music & play victory flourish
+            stopBattleLoop();
+            initAudio();
+            playEnemyDefeatedSound();
+            playSfx({ type: "enemy_defeated" });
+
+            // haptic on enemy defeated
+            try {
+              window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+            } catch (err) {}
+          }
+
+          if (crowdSize <= 0) {
+            crowdSize = 0;
+            running = false;
+            reportGameOver(); // report loss via Farcade
+          }
+        }
+
+        for (let enemy of enemies) {
+          if (!enemy.defeated && enemy.y > canvas.clientHeight - 50) {
+            crowdSize = 0;
+            running = false;
+            reportGameOver();
+          }
+        }
+      }
+
+      function drawUI() {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.8)";
+        ctx.fillRect(0, 0, w, 50);
+
+        ctx.fillStyle = "#FFD700";
+        ctx.font = "bold 20px Arial";
+        ctx.textAlign = "left";
+        ctx.fillText(`👥 ${crowdSize}`, 15, 30);
+
+        ctx.textAlign = "right";
+        ctx.fillText(`Level ${level}`, w - 15, 30);
+
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#FFFFFF";
+        ctx.font = "14px Arial";
+        ctx.fillText(`Gates: ${gatesPassedCount}/${totalGatesPerLevel}`, pathCenter, 45);
+
+        // Flight indicator
+        if (flying) {
+          const pct = Math.max(0, Math.min(1, flightTimer / flightDurationFrames));
+          ctx.fillStyle = "rgba(255,255,255,0.9)";
+          ctx.font = "13px Arial";
+          ctx.textAlign = "left";
+          ctx.fillText(`⟡ Flight: ${Math.ceil(pct * 100)}%`, 15, 48);
+        }
+      }
+
+      function showLevelComplete() {
+        playBtn.textContent = `🚀 Level ${level + 1}`;
+        playBtn.style.display = "inline-block";
+        canvas.style.display = "none";
+        updateControlsVisibility();
+        infoText.innerHTML = `
+    <div style="font-size: 28px; margin-bottom: 15px; color: #FFD700;">🏆 Level ${level} Complete!</div>
+    <div style="font-size: 20px; margin-bottom: 10px;">Final Army: <span style="color: #4CAF50;">${crowdSize} soldiers</span></div>
+    <div style="font-size: 18px; color: #87CEEB;">Ready for the next challenge?</div>
+  `;
+        level++;
+        crowdSize = 1;
+        crowdMax = 1;
+
+        // optional haptic
+        try {
+          window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+        } catch (e) {}
+      }
+
+      function reportGameOver() {
+        if (farcadeReported) return;
+        farcadeReported = true;
+
+        // compute score (simple formula)
+        const scoreVal = Math.max(0, Math.round(gatesPassedCount * 10 + crowdSize + (level - 1) * 20));
+
+        // haptic feedback
+        try {
+          window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+        } catch (e) {}
+
+        // call Farcade gameOver
+        try {
+          window.FarcadeSDK?.singlePlayer?.actions?.gameOver({ score: scoreVal });
+        } catch (e) {}
+
+        // Show minimal UI: reveal play button and keep info empty (no custom game-over screen)
+        canvas.style.display = "none";
+        updateControlsVisibility();
+        playBtn.style.display = "inline-block";
+        playBtn.textContent = "🔄 Restart Game";
+        infoText.innerHTML = "";
+
+        // stop audio loops
+        if (bgInterval) stopBackgroundLoop();
+        if (battleInterval) stopBattleLoop();
+      }
+
+      function loop() {
+        if (!running) return;
+
+        ctx.save();
+        if (battleShake > 0) {
+          const shakeX = (Math.random() - 0.5) * battleShake;
+          const shakeY = (Math.random() - 0.5) * battleShake;
+          ctx.translate(shakeX, shakeY);
+        }
+
+        ctx.clearRect(0, 0, w, h);
+
+        if (!battleMode) {
+          for (let g of gates) {
+            g.y += autoSpeed;
+          }
+          for (let e of enemies) {
+            e.y += autoSpeed;
+          }
+          for (let hz of hazards) {
+            hz.y += autoSpeed;
+          }
+          for (let t of treasures) {
+            t.y += autoSpeed;
+          }
+        }
+
+        drawPath();
+        drawGates();
+        drawHazards();
+        drawTreasures();
+        drawEnemies();
+        drawCrowd();
+        drawBattleEffects();
+        drawUI();
+
+        handleInput();
+        checkCollisions();
+        updateBattleEffects();
+
+        // flight timer update
+        if (flying) {
+          flightTimer--;
+          if (flightTimer <= 0) {
+            flying = false;
+            flightTimer = 0;
+          }
+        }
+
+        ctx.restore();
+        requestAnimationFrame(loop);
+      }
+
+      // Play button behavior
+      playBtn.addEventListener("click", () => {
+        // user gesture allows audio start
+        initAudio();
+        // resume audio context if needed
+        if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+        // background music intentionally disabled per user request
+
+        playBtn.style.display = "none";
+
+        if (playBtn.textContent.includes("Restart")) {
+          level = 1;
+          crowdSize = 1;
+          crowdMax = 1;
+        }
+
+        infoText.innerHTML = `
+    <div style="margin-bottom: 8px; font-size: 18px;">🎯 Level ${level} - Build Your Army!</div>
+    <div style="font-size: 16px;">← → or A/D: Move | Avoid bumps or collect gems to fly!</div>
+    <div style="font-size: 14px; color: #87CEEB;">Fight enemies and reach the finish line!</div>
+  `;
+        canvas.style.display = "block";
+        updateControlsVisibility();
+        // ensure correct measurement after canvas becomes visible
+        requestAnimationFrame(() => {
+          resizeCanvas();
+          resetGame();
+        });
+        // haptic when starting
+        try {
+          window.FarcadeSDK?.singlePlayer?.actions?.hapticFeedback();
+        } catch (e) {}
+      });
+
+      // Touch drag to move (mobile) - kept for smooth dragging
+      let ongoingTouch = null;
+
+      // --- Farcade SDK integration & event hooks ---
+      // Ensure SDK handlers exist (no-op if not available)
+      try {
+        window.FarcadeSDK?.on?.("play_again", () => {
+          // Reset state and restart gameplay
+          playBtn.style.display = "none";
+          infoText.innerHTML = "";
+          level = 1;
+          // ensure visible before measuring
+          canvas.style.display = "block";
+          updateControlsVisibility();
+
+          // ensure audio resumed & started if available
+          initAudio();
+          if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+          // background music intentionally disabled
+
+          requestAnimationFrame(() => {
+            resizeCanvas();
+            resetGame();
+          });
+        });
+
+        window.FarcadeSDK?.on?.("toggle_mute", ({ isMuted: muteFlag }) => {
+          setMuted(muteFlag);
+        });
+      } catch (e) {}
+
+      // On initial load, notify Farcade ready after a brief setup
+      function notifyFarcadeReady() {
+        try {
+          window.FarcadeSDK?.singlePlayer?.actions?.ready();
+        } catch (e) {}
+      }
+
+      // Call ready once DOM + canvas configured
+      setTimeout(() => {
+        resizeCanvas();
+        notifyFarcadeReady();
+      }, 200);
+
+      // Ensure initial layout stable
+      resizeCanvas();
+    </script>
+  </body>
+</html>
